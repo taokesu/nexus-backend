@@ -56,7 +56,7 @@ TEMPLATES = [{
 WSGI_APPLICATION = 'config.wsgi.application'
 
 # ─── База данных PostgreSQL ─────────────────────────────────
-'''DATABASES = {
+DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME':     config('DB_NAME'),
@@ -65,24 +65,22 @@ WSGI_APPLICATION = 'config.wsgi.application'
         'HOST':     config('DB_HOST', default='localhost'),
         'PORT':     config('DB_PORT', default='5432'),
     }
-}'''
-
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
 }
+
+
 
 # ─── Django REST Framework ──────────────────────────────────
 REST_FRAMEWORK = {
-    # Все эндпоинты требуют JWT по умолчанию
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
+    # Убираем жесткое требование авторизации глобально
     'DEFAULT_PERMISSION_CLASSES': (
-        'rest_framework.permissions.IsAuthenticated',
+        'rest_framework.permissions.IsAuthenticatedOrReadOnly',
     ),
+    # Включаем пагинацию
+    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    'PAGE_SIZE': 10,
 }
 
 # ─── JWT Токены ─────────────────────────────────────────────

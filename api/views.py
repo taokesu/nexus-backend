@@ -13,10 +13,12 @@ class IsAdmin(permissions.BasePermission):
     def has_permission(self, request, view):
         return request.user.is_authenticated and request.user.role == 'admin'
 
-class IsOwnerOrAdmin(permissions.BasePermission):
-    def has_object_permission(self, request, view, obj):
-        return request.user.role == 'admin' or obj.user == request.user
-
+class IsAdminOrReadOnly(permissions.BasePermission):
+    """Админ может всё, остальные — только читать (GET)"""
+    def has_permission(self, request, view):
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        return request.user.is_authenticated and request.user.role == 'admin'
 
 # ─── Авторизация ─────────────────────────────────────────────
 
@@ -139,18 +141,18 @@ class PaymentHistoryView(generics.ListAPIView):
 # ─── Компьютеры ───────────────────────────────────────────────
 
 class PCViewSet(viewsets.ReadOnlyModelViewSet):
-    """GET /api/pcs/"""
+    """GET /api/pcs/ — доступно всем"""
+    queryset           = PC.objects.select_related('zone').all()
     serializer_class   = PCSerializer
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.AllowAny] 
 
     def get_queryset(self):
-        qs = PC.objects.select_related('zone').all()
-        zone   = self.request.query_params.get('zone')
-        status = self.request.query_params.get('status')
+        qs = super().get_queryset()
+        zone = self.request.query_params.get('zone')
+        status_param = self.request.query_params.get('status')
         if zone:   qs = qs.filter(zone__zone_type=zone)
-        if status: qs = qs.filter(status=status)
+        if status_param: qs = qs.filter(status=status_param)
         return qs
-
 
 # ─── Тарифы ──────────────────────────────────────────────────
 
@@ -223,6 +225,8 @@ class BookingViewSet(viewsets.ModelViewSet):
 class TournamentViewSet(viewsets.ModelViewSet):
     queryset           = Tournament.objects.all()
     serializer_class   = TournamentSerializer
+    # Используем новое правило: читать могут все, создавать/редактировать — только админ
+    permission_classes =[IsAdminOrReadOnly]
 
     def get_permissions(self):
         if self.action in ['list', 'retrieve']:
@@ -276,6 +280,8 @@ class TournamentViewSet(viewsets.ModelViewSet):
 
 class NewsViewSet(viewsets.ModelViewSet):
     serializer_class = NewsSerializer
+    # Теперь админ редактирует, а пользователи просто читают
+    permission_classes = [IsAdminOrReadOnly]
 
     def get_permissions(self):
         if self.action in ['list', 'retrieve']:
