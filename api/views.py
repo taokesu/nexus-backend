@@ -3,6 +3,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.utils import timezone
+from decimal import Decimal, InvalidOperation
 from .models import *
 from .serializers import *
 
@@ -98,9 +99,29 @@ class UserViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset()
-        # Аннотируем количество бронирований
         from django.db.models import Count
         return qs.annotate(bookings_count=Count('bookings'))
+
+    @action(detail=True, methods=['post'], url_path='topup')
+    def topup(self, request, pk=None):
+        """POST /api/users/{id}/topup/ — пополнение баланса пользователя администратором"""
+        user = self.get_object()
+        try:
+            amount = Decimal(str(request.data.get('amount', '')))
+            if amount <= 0:
+                raise ValueError()
+        except (InvalidOperation, ValueError):
+            return Response({'detail': 'Введи корректную сумму'}, status=400)
+
+        user.balance += amount
+        user.save()
+
+        Payment.objects.create(
+            user=user, amount=amount,
+            type='topup',
+            description=f'Пополнение баланса администратором на {amount} ₽',
+        )
+        return Response({'balance': user.balance, 'message': f'Баланс пополнен на {amount} ₽'})
 
 
 # ─── Пополнение баланса ───────────────────────────────────────
@@ -140,19 +161,44 @@ class PaymentHistoryView(generics.ListAPIView):
 
 # ─── Компьютеры ───────────────────────────────────────────────
 
-class PCViewSet(viewsets.ReadOnlyModelViewSet):
-    """GET /api/pcs/ — доступно всем"""
-    queryset           = PC.objects.select_related('zone').all()
-    serializer_class   = PCSerializer
-    permission_classes = [permissions.AllowAny] 
+class PCViewSet(viewsets.ModelViewSet):
+    """GET /api/pcs/ — чтение для всех, изменение для admin"""
+    serializer_class = PCSerializer
+
+    def get_permissions(self):
+        if self.action in ['list', 'retrieve', 'busy_slots']:
+            return [permissions.AllowAny()]
+        return [IsAdmin()]
 
     def get_queryset(self):
-        qs = super().get_queryset()
-        zone = self.request.query_params.get('zone')
-        status_param = self.request.query_params.get('status')
-        if zone:   qs = qs.filter(zone__zone_type=zone)
-        if status_param: qs = qs.filter(status=status_param)
+        qs = PC.objects.select_related('zone').all()
+        zone   = self.request.query_params.get('zone')
+        s      = self.request.query_params.get('status')
+        if zone: qs = qs.filter(zone__zone_type=zone)
+        if s:    qs = qs.filter(status=s)
         return qs
+
+    @action(detail=True, methods=['get'], url_path='busy_slots')
+    def busy_slots(self, request, pk=None):
+        """GET /api/pcs/{id}/busy_slots/?date=YYYY-MM-DD"""
+        pc = self.get_object()
+        date_str = request.query_params.get('date')
+        if not date_str:
+            return Response({'detail': 'Укажи параметр date (YYYY-MM-DD)'}, status=400)
+        try:
+            from datetime import date
+            target_date = date.fromisoformat(date_str)
+        except ValueError:
+            return Response({'detail': 'Неверный формат даты'}, status=400)
+
+        bookings = Booking.objects.filter(
+            pc=pc,
+            status='active',
+            start_time__date=target_date,
+        )
+        slots = [{'start': b.start_time.strftime('%H:%M'), 'end': b.end_time.strftime('%H:%M')}
+                 for b in bookings]
+        return Response(slots)
 
 # ─── Тарифы ──────────────────────────────────────────────────
 
@@ -171,18 +217,21 @@ class BookingViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        now = timezone.now()
+        Booking.objects.filter(status='active', end_time__lt=now).update(status='completed')
         user = self.request.user
-        # Admin видит все, пользователь — только свои
         if user.role == 'admin':
             return Booking.objects.select_related('user', 'pc__zone', 'tariff').all()
         return Booking.objects.filter(user=user).select_related('pc__zone', 'tariff')
 
     def perform_create(self, serializer):
-        serializer.save()   # user подставляется в BookingSerializer.create()
+        serializer.save()
 
     @action(detail=False, methods=['get'], url_path='my')
     def my(self, request):
         """GET /api/bookings/my/"""
+        now = timezone.now()
+        Booking.objects.filter(user=request.user, status='active', end_time__lt=now).update(status='completed')
         qs = Booking.objects.filter(user=request.user).select_related('pc__zone', 'tariff')
         serializer = self.get_serializer(qs, many=True)
         return Response(serializer.data)
@@ -200,7 +249,7 @@ class BookingViewSet(viewsets.ModelViewSet):
         # Возврат средств (50% если меньше часа до начала)
         now = timezone.now()
         minutes_left = (booking.start_time - now).total_seconds() / 60
-        refund = booking.total_price if minutes_left > 60 else booking.total_price * 0.5
+        refund = booking.total_price if minutes_left > 60 else booking.total_price * Decimal('0.5')
 
         booking.status = 'cancelled'
         booking.save()
@@ -212,7 +261,7 @@ class BookingViewSet(viewsets.ModelViewSet):
         booking.user.save()
 
         Payment.objects.create(
-            user=booking.user, booking=booking,
+            user=booking.user,
             amount=refund, type='refund',
             description=f'Возврат за отмену бронирования #{booking.pk}',
         )
